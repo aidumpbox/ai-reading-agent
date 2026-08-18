@@ -1,97 +1,67 @@
 #!/usr/bin/env python3
 """
-Daily Reading Agent
---------------------
-1. Searches Google Custom Search (news) for a list of topics.
-2. Sends each article's title/snippet/url to Claude to extract
-   structured facts.
-3. Appends the day's results to data/data.json, which a static
-   webpage (index.html) reads and renders.
+Daily Reading Agent (Google-only, free-tier stack)
+----------------------------------------------------
+1. Pulls today's articles for each topic via Google Custom Search JSON API
+   (free: 100 queries/day).
+2. Hands them to Gemini (free tier: Flash models) along with the
+   instructions in AGENTS.md, and lets the model decide what's worth
+   keeping and what facts to extract.
+3. Saves results to data/data.json, which index.html renders.
 
 Env vars required (set as GitHub Actions secrets):
-  GOOGLE_API_KEY   - Google Cloud API key with Custom Search JSON API enabled
-  GOOGLE_CX        - Programmable Search Engine ID (the "cx" value)
-  ANTHROPIC_API_KEY - Anthropic API key
+  GOOGLE_API_KEY  - Google Cloud API key with Custom Search JSON API enabled
+  GOOGLE_CX       - Programmable Search Engine ID
+  GEMINI_API_KEY  - API key from Google AI Studio (aistudio.google.com)
 """
 
 import os
 import json
 import datetime
 import requests
-import anthropic
+from google import genai
 
-# ---- Config ----------------------------------------------------------
 TOPICS = [
     "AI business news",
 ]
-RESULTS_PER_TOPIC = 5          # how many articles to pull per topic per day
+RESULTS_PER_TOPIC = 5
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "data.json")
-CLAUDE_MODEL = "claude-sonnet-4-6"
+AGENTS_FILE = os.path.join(os.path.dirname(__file__), "AGENTS.md")
+GEMINI_MODEL = "gemini-2.5-flash"
 
-# ---- Google Custom Search ---------------------------------------------
 
 def google_search(query, api_key, cx, num=5):
-    """Return a list of {title, link, snippet} dicts from Google CSE."""
     url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": api_key,
-        "cx": cx,
-        "q": query,
-        "num": num,
-        "sort": "date",  # bias toward recent results
-    }
+    params = {"key": api_key, "cx": cx, "q": query, "num": num, "sort": "date"}
     resp = requests.get(url, params=params, timeout=20)
     resp.raise_for_status()
     items = resp.json().get("items", [])
     return [
-        {
-            "title": item.get("title", ""),
-            "link": item.get("link", ""),
-            "snippet": item.get("snippet", ""),
-        }
-        for item in items
+        {"title": i.get("title", ""), "link": i.get("link", ""), "snippet": i.get("snippet", "")}
+        for i in items
     ]
 
 
-# ---- Claude extraction --------------------------------------------------
-
-EXTRACTION_PROMPT = """You will be given a news article's title, URL, and snippet.
-Extract the key facts and data points a reader would want from a daily digest.
-
-Return ONLY valid JSON (no markdown fences, no preamble) matching this shape:
-{{
-  "headline": "short restated headline",
-  "key_facts": ["fact 1", "fact 2", "..."],
-  "companies_or_entities": ["..."],
-  "numbers_mentioned": ["e.g. $2.1B funding round", "e.g. 40% growth"],
-  "why_it_matters": "one sentence"
-}}
-
-Article title: {title}
-Article URL: {link}
-Article snippet: {snippet}
-"""
+def load_agent_instructions():
+    with open(AGENTS_FILE, "r") as f:
+        return f.read()
 
 
-def extract_facts(client, article):
-    prompt = EXTRACTION_PROMPT.format(
-        title=article["title"], link=article["link"], snippet=article["snippet"]
+def extract_with_gemini(client, instructions, articles):
+    articles_block = "\n\n".join(
+        f"Title: {a['title']}\nURL: {a['link']}\nSnippet: {a['snippet']}"
+        for a in articles
     )
-    resp = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=500,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = resp.content[0].text.strip()
-    # Strip accidental code fences just in case
+    prompt = f"{instructions}\n\n---\nToday's articles:\n\n{articles_block}\n\n---\nReturn the JSON array now."
+
+    resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    text = resp.text.strip()
     text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"error": "failed_to_parse", "raw": text}
+        return [{"skip": True, "skip_reason": "failed_to_parse", "raw": text}]
 
-
-# ---- Main ----------------------------------------------------------------
 
 def load_existing_data():
     if os.path.exists(DATA_FILE):
@@ -109,7 +79,8 @@ def save_data(data):
 def main():
     google_api_key = os.environ["GOOGLE_API_KEY"]
     google_cx = os.environ["GOOGLE_CX"]
-    anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    instructions = load_agent_instructions()
 
     today = datetime.date.today().isoformat()
     day_entry = {"date": today, "topics": []}
@@ -117,24 +88,19 @@ def main():
     for topic in TOPICS:
         print(f"Searching: {topic}")
         articles = google_search(topic, google_api_key, google_cx, num=RESULTS_PER_TOPIC)
+        if not articles:
+            day_entry["topics"].append({"topic": topic, "articles": []})
+            continue
 
-        extracted_articles = []
-        for article in articles:
-            facts = extract_facts(anthropic_client, article)
-            extracted_articles.append(
-                {
-                    "title": article["title"],
-                    "link": article["link"],
-                    "extracted": facts,
-                }
-            )
+        print(f"Extracting facts for {len(articles)} articles via Gemini...")
+        extracted = extract_with_gemini(gemini_client, instructions, articles)
 
-        day_entry["topics"].append({"topic": topic, "articles": extracted_articles})
+        kept = [e for e in extracted if isinstance(e, dict) and not e.get("skip")]
+        day_entry["topics"].append({"topic": topic, "articles": kept})
 
     data = load_existing_data()
-    # Replace today's entry if the workflow runs twice in a day, else append
     data["days"] = [d for d in data["days"] if d["date"] != today]
-    data["days"].insert(0, day_entry)  # newest first
+    data["days"].insert(0, day_entry)
     save_data(data)
     print(f"Saved results for {today} to {DATA_FILE}")
 
