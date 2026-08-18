@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Business News — Daily Reading Agent</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --border: #262a33;
+    --text: #e7e9ee;
+    --muted: #9aa1ad;
+    --accent: #6fb3ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 28px; }
+  .day-header {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 32px 0 12px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 1rem; }
+  .card a { color: var(--accent); text-decoration: none; font-size: 0.85rem; }
+  .facts { margin: 10px 0 0; padding-left: 18px; }
+  .facts li { margin-bottom: 4px; font-size: 0.9rem; }
+  .meta { margin-top: 10px; font-size: 0.82rem; color: var(--muted); }
+  .why { margin-top: 10px; font-size: 0.88rem; font-style: italic; color: var(--muted); }
+  #status { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Daily Reading Agent</h1>
+  <div class="sub">AI business news, auto-summarized daily via Google Search + Claude</div>
+  <div id="status">Loading…</div>
+  <div id="content"></div>
+</div>
+
+<script>
+async function load() {
+  const status = document.getElementById('status');
+  const content = document.getElementById('content');
+  try {
+    const res = await fetch('data/data.json?_=' + Date.now());
+    if (!res.ok) throw new Error('No data yet');
+    const data = await res.json();
+    status.style.display = 'none';
+
+    if (!data.days || data.days.length === 0) {
+      content.innerHTML = '<p>No entries yet — check back after the first daily run.</p>';
+      return;
+    }
+
+    for (const day of data.days) {
+      const dayHeader = document.createElement('div');
+      dayHeader.className = 'day-header';
+      dayHeader.textContent = day.date;
+      content.appendChild(dayHeader);
+
+      for (const topicBlock of day.topics) {
+        for (const article of topicBlock.articles) {
+          const ex = article.extracted || {};
+          const card = document.createElement('div');
+          card.className = 'card';
+
+          const factsHtml = (ex.key_facts || [])
+            .map(f => `<li>${escapeHtml(f)}</li>`).join('');
+
+          card.innerHTML = `
+            <h3>${escapeHtml(ex.headline || article.title)}</h3>
+            <a href="${article.link}" target="_blank" rel="noopener">Read source →</a>
+            <ul class="facts">${factsHtml}</ul>
+            ${ex.why_it_matters ? `<div class="why">${escapeHtml(ex.why_it_matters)}</div>` : ''}
+            <div class="meta">${topicBlock.topic}</div>
+          `;
+          content.appendChild(card);
+        }
+      }
+    }
+  } catch (err) {
+    status.textContent = 'No data yet — the daily job may not have run.';
+  }
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+load();
+</script>
+</body>
+</html>
